@@ -170,11 +170,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
+	defer func(body io.Closer) {
+		if errClose := body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-	}()
+	}(httpResp.Body)
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
