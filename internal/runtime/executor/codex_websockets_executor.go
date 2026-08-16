@@ -8,10 +8,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
@@ -31,11 +35,9 @@ func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
 	}
 }
 
-// CodexAutoExecutor routes Codex requests to the websocket transport only when:
-//  1. The downstream transport is websocket, and
-//  2. The selected auth enables websockets.
-//
-// For non-websocket downstream requests, it always uses the legacy HTTP implementation.
+// CodexAutoExecutor routes Codex requests to the websocket transport when:
+//  1. The selected auth enables websockets, and
+//  2. The downstream transport is websocket or the model prefers websockets.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -68,7 +70,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth, req.Model) {
 		return e.wsExec.Execute(ctx, auth, req, opts)
 	}
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
@@ -81,7 +83,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if e == nil || e.httpExec == nil || e.wsExec == nil {
 		return nil, fmt.Errorf("codex auto executor: executor is nil")
 	}
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
+	if codexShouldUseWebsockets(ctx, auth, req.Model) {
 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
 	}
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
@@ -116,6 +118,49 @@ func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan erro
 		return nil
 	}
 	return e.wsExec.UpstreamDisconnectChan(sessionID)
+}
+
+func codexShouldUseWebsockets(ctx context.Context, auth *cliproxyauth.Auth, model string) bool {
+	if !codexWebsocketsEnabled(auth) {
+		return false
+	}
+	if cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return true
+	}
+	return codexModelRequiresWebsockets(model)
+}
+
+func codexModelRequiresWebsockets(model string) bool {
+	base := thinking.ParseSuffix(model).ModelName
+	if strings.TrimSpace(base) == "" {
+		return false
+	}
+	codexWSPreferredModelsOnce.Do(loadCodexWSPreferredModels)
+	_, ok := codexWSPreferredModels[base]
+	return ok
+}
+
+var (
+	codexWSPreferredModelsOnce sync.Once
+	codexWSPreferredModels     map[string]struct{}
+)
+
+func loadCodexWSPreferredModels() {
+	codexWSPreferredModels = make(map[string]struct{})
+	models := gjson.GetBytes(registry.GetCodexClientModelsJSON(), "models")
+	if !models.IsArray() {
+		return
+	}
+	for _, m := range models.Array() {
+		if !m.Get("prefer_websockets").Bool() {
+			continue
+		}
+		slug := strings.TrimSpace(m.Get("slug").String())
+		if slug == "" {
+			continue
+		}
+		codexWSPreferredModels[slug] = struct{}{}
+	}
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
