@@ -170,7 +170,7 @@ var (
 
 func loadCodexWSPreferredModels() {
 	codexWSPreferredModels = make(map[string]struct{})
-	models := gjson.GetBytes(registry.GetCodexClientModelsJSON(), "models")
+	models := ojson.GetBytes(registry.GetCodexClientModelsJSON(), "models")
 	if !models.IsArray() {
 		return
 	}
